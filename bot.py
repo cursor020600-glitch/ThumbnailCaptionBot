@@ -8,9 +8,11 @@ Telegram Video Processor Bot — Final
 ✅ @username replace + credit line
 ✅ Koi extra library nahi — sirf python-telegram-bot==22.x
 ✅ Python 3.14 event loop fix
+✅ Render port binding fix — health server on PORT env variable
 """
 
-import os, re, json, logging, asyncio
+import os, re, json, logging, asyncio, threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, MessageEntity
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler,
@@ -24,6 +26,25 @@ logger = logging.getLogger(__name__)
 
 CONFIG_FILE = "config.json"
 (SETUP_USERNAME, SETUP_KEEP_LINKS, SETUP_THUMBNAIL, AWAIT_THUMBNAIL_IMAGE, SETTHUMB_AWAIT) = range(5)
+
+
+# ══════════════════════════════════════════════
+#  Render Health Server — fixes "No open ports" warning
+# ══════════════════════════════════════════════
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+    def log_message(self, *args):
+        pass  # silence access logs
+
+def run_health_server():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), HealthHandler)
+    logger.info(f"Health server running on port {port}")
+    server.serve_forever()
 
 
 # ══════════════════════════════════════════════
@@ -284,7 +305,7 @@ async def setthumb_recv(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await f.download_to_drive(p)
     cfg = load_config()
     cfg["thumbnail_local"] = p
-    cfg["thumbnail_file_id"] = None  # reset cache
+    cfg["thumbnail_file_id"] = None
     save_config(cfg)
     await update.message.reply_text("✅ Thumbnail updated!")
     return ConversationHandler.END
@@ -406,7 +427,7 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ══════════════════════════════════════════════
-#  Main — Python 3.14 event loop fix applied
+#  Main
 # ══════════════════════════════════════════════
 def main():
     token = os.environ.get("BOT_TOKEN")
@@ -420,9 +441,12 @@ def main():
     if not token:
         raise ValueError("BOT_TOKEN not set! Add to .env:  BOT_TOKEN=your_token")
 
-    # ✅ Fix for Python 3.10+ / 3.14 — explicitly create and set a new event loop
+    # ✅ Fix 1: Python 3.14 event loop fix
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
+
+    # ✅ Fix 2: Render port binding — start health server in background thread
+    threading.Thread(target=run_health_server, daemon=True).start()
 
     app = Application.builder().token(token).build()
 
@@ -452,7 +476,7 @@ def main():
         handle_video
     ))
 
-    print("🤖 Bot running — PTB v22 cover parameter thumbnail!")
+    print("🤖 Bot running — PTB v22 + Render health server!")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
