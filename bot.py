@@ -9,6 +9,7 @@ Telegram Video Processor Bot — Final
 ✅ Koi extra library nahi — sirf python-telegram-bot==22.x
 ✅ Python 3.14 event loop fix
 ✅ Render port binding fix — health server on PORT env variable
+✅ Custom word/phrase removal from captions
 """
 
 import os, re, json, logging, asyncio, threading
@@ -25,7 +26,7 @@ logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=lo
 logger = logging.getLogger(__name__)
 
 CONFIG_FILE = "config.json"
-(SETUP_USERNAME, SETUP_KEEP_LINKS, SETUP_THUMBNAIL, AWAIT_THUMBNAIL_IMAGE, SETTHUMB_AWAIT) = range(5)
+(SETUP_USERNAME, SETUP_KEEP_LINKS, SETUP_THUMBNAIL, AWAIT_THUMBNAIL_IMAGE, SETTHUMB_AWAIT, SETUP_REMOVE_WORDS) = range(6)
 
 
 # ══════════════════════════════════════════════
@@ -64,11 +65,18 @@ def save_config(cfg: dict):
 # ══════════════════════════════════════════════
 #  Caption + Entity processing
 # ══════════════════════════════════════════════
-def process_entities(caption: str, entities: list, my_username: str, keep_links: bool):
+def process_entities(caption: str, entities: list, my_username: str, keep_links: bool, remove_words: list = None):
     if not caption:
         caption = ""
     entities = list(entities) if entities else []
     clean_uname = my_username.lstrip("@")
+
+    # Remove specified words/phrases from caption before processing
+    if remove_words:
+        for word in remove_words:
+            if word.strip():
+                caption = caption.replace(word.strip(), "")
+        caption = re.sub(r"\n{3,}", "\n\n", caption).strip()
 
     def u16_to_char(text, u16_off):
         return len(text.encode("utf-16-le")[:u16_off * 2].decode("utf-16-le"))
@@ -196,11 +204,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cfg = load_config()
     if cfg:
         thumb_ok = bool(cfg.get("thumbnail_local") and os.path.exists(cfg.get("thumbnail_local", "")))
+        remove_words = cfg.get("remove_words", [])
+        rw_display = ", ".join(remove_words) if remove_words else "None"
         text = (
             "✅ *Bot is ready!*\n\n"
             f"👤 Username: `@{cfg.get('username','not set')}`\n"
             f"🔗 Keep links: `{'Yes' if cfg.get('keep_links') else 'No'}`\n"
-            f"🖼 Thumbnail: `{'Set ✅' if thumb_ok else 'Not set ❌'}`\n\n"
+            f"🖼 Thumbnail: `{'Set ✅' if thumb_ok else 'Not set ❌'}`\n"
+            f"🗑 Remove words: `{rw_display}`\n\n"
             "📨 Forward any video — processed instantly!\n\n"
             "/setup · /settings · /setthumb · /viewthumb"
         )
@@ -214,7 +225,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ══════════════════════════════════════════════
 async def setup_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "⚙️ *Setup — Step 1/3*\n\nEnter your Telegram username:\n_(e.g. `Coursesbuying`)_",
+        "⚙️ *Setup — Step 1/4*\n\nEnter your Telegram username:\n_(e.g. `Coursesbuying`)_",
         parse_mode=ParseMode.MARKDOWN)
     return SETUP_USERNAME
 
@@ -227,7 +238,7 @@ async def setup_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb = [[InlineKeyboardButton("✅ Keep links", callback_data="links_yes"),
            InlineKeyboardButton("❌ Remove links", callback_data="links_no")]]
     await update.message.reply_text(
-        f"✅ `@{username}`\n\n*Step 2/3:* Keep clickable links in captions?",
+        f"✅ `@{username}`\n\n*Step 2/4:* Keep clickable links in captions?",
         reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN)
     return SETUP_KEEP_LINKS
 
@@ -238,7 +249,7 @@ async def setup_keep_links(update: Update, context: ContextTypes.DEFAULT_TYPE):
            InlineKeyboardButton("⏭ Skip", callback_data="thumb_skip")]]
     await q.edit_message_text(
         f"{'✅ Links kept.' if context.user_data['kl'] else '❌ Links removed.'}\n\n"
-        "*Step 3/3:* Set a custom thumbnail?",
+        "*Step 3/4:* Set a custom thumbnail?",
         reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN)
     return SETUP_THUMBNAIL
 
@@ -246,8 +257,12 @@ async def setup_thumbnail_choice(update: Update, context: ContextTypes.DEFAULT_T
     q = update.callback_query; await q.answer()
     if q.data == "thumb_skip":
         context.user_data["tp"] = None
-        await q.edit_message_text("⏭ No thumbnail.")
-        return await _finalize_setup(update, context)
+        await q.edit_message_text(
+            "⏭ No thumbnail.\n\n*Step 4/4:* Caption se koi word/phrase delete karna hai?\n\n"
+            "Ek ek karke likho, har word/phrase alag line mein.\n"
+            "Ya `skip` likho agar kuch nahi hatana.",
+            parse_mode=ParseMode.MARKDOWN)
+        return SETUP_REMOVE_WORDS
     await q.edit_message_text("🖼 Send thumbnail image now (as photo):")
     return AWAIT_THUMBNAIL_IMAGE
 
@@ -261,23 +276,41 @@ async def setup_recv_thumb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     p = f"thumbnails/thumb_{update.effective_user.id}.jpg"
     await f.download_to_drive(p)
     context.user_data["tp"] = p
-    await update.message.reply_text("✅ Thumbnail saved!")
+    await update.message.reply_text(
+        "✅ Thumbnail saved!\n\n*Step 4/4:* Caption se koi word/phrase delete karna hai?\n\n"
+        "Ek ek karke likho, har word/phrase alag line mein.\n"
+        "Ya `skip` likho agar kuch nahi hatana.",
+        parse_mode=ParseMode.MARKDOWN)
+    return SETUP_REMOVE_WORDS
+
+async def setup_remove_words(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    if text.lower() == "skip":
+        context.user_data["rw"] = []
+    else:
+        # Har line ek alag word/phrase
+        words = [w.strip() for w in text.split("\n") if w.strip()]
+        context.user_data["rw"] = words
     return await _finalize_setup(update, context)
 
 async def _finalize_setup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ud = context.user_data
+    remove_words = ud.get("rw", [])
     cfg = {
         "username": ud["u"],
         "keep_links": ud.get("kl", True),
         "thumbnail_local": ud.get("tp"),
         "thumbnail_file_id": None,
+        "remove_words": remove_words,
     }
     save_config(cfg)
+    rw_display = "\n".join(f"  • `{w}`" for w in remove_words) if remove_words else "  _None_"
     target = update.callback_query.message if update.callback_query else update.message
     await target.reply_text(
         f"🎉 *Done!*\n\n👤 `@{cfg['username']}`\n"
         f"🔗 Links: `{'Keep' if cfg['keep_links'] else 'Remove'}`\n"
-        f"🖼 Thumb: `{'Set ✅' if cfg['thumbnail_local'] else 'Not set'}`\n\n"
+        f"🖼 Thumb: `{'Set ✅' if cfg['thumbnail_local'] else 'Not set'}`\n"
+        f"🗑 Remove words:\n{rw_display}\n\n"
         "📨 Forward a video now!",
         parse_mode=ParseMode.MARKDOWN)
     return ConversationHandler.END
@@ -333,11 +366,14 @@ async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ Not configured. Use /setup")
         return
     thumb_ok = bool(cfg.get("thumbnail_local") and os.path.exists(cfg.get("thumbnail_local", "")))
+    remove_words = cfg.get("remove_words", [])
+    rw_display = ", ".join(remove_words) if remove_words else "None"
     await update.message.reply_text(
         "⚙️ *Settings*\n\n"
         f"👤 `@{cfg.get('username','not set')}`\n"
         f"🔗 Links: `{'Keep' if cfg.get('keep_links') else 'Remove'}`\n"
-        f"🖼 Thumb: `{'Set ✅' if thumb_ok else 'Not set ❌'}`\n\n"
+        f"🖼 Thumb: `{'Set ✅' if thumb_ok else 'Not set ❌'}`\n"
+        f"🗑 Remove words: `{rw_display}`\n\n"
         "/setup · /setthumb · /viewthumb",
         parse_mode=ParseMode.MARKDOWN)
 
@@ -366,7 +402,8 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg.caption or "",
         list(msg.caption_entities) if msg.caption_entities else [],
         cfg["username"],
-        cfg.get("keep_links", True)
+        cfg.get("keep_links", True),
+        cfg.get("remove_words", [])
     )
 
     thumb_local = cfg.get("thumbnail_local")
@@ -457,6 +494,7 @@ def main():
             SETUP_KEEP_LINKS:      [CallbackQueryHandler(setup_keep_links, pattern="^links_")],
             SETUP_THUMBNAIL:       [CallbackQueryHandler(setup_thumbnail_choice, pattern="^thumb_")],
             AWAIT_THUMBNAIL_IMAGE: [MessageHandler(filters.PHOTO, setup_recv_thumb)],
+            SETUP_REMOVE_WORDS:    [MessageHandler(filters.TEXT, setup_remove_words)],
         },
         fallbacks=[CommandHandler("cancel", setup_cancel)],
     )
