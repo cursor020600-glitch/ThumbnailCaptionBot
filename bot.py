@@ -124,10 +124,13 @@ def process_entities(caption: str, entities: list, my_username: str, keep_links:
         chunk = caption[cs:ce]
 
         if et == MessageEntity.MENTION:
+            prefix = "Extracted by :- "
             new_m = f"@{clean_uname}"
-            out_text += new_m
+            full = prefix + new_m
+            out_text += full
+            mention_u16 = to_u16len(out_text) - to_u16len(new_m)
             out_ents.append(MessageEntity(type=MessageEntity.MENTION,
-                offset=cur_u16, length=to_u16len(new_m)))
+                offset=mention_u16, length=to_u16len(new_m)))
 
         elif et == MessageEntity.TEXT_LINK:
             url = e["url"] or ""
