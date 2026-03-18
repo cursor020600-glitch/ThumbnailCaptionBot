@@ -74,8 +74,16 @@ def process_entities(caption: str, entities: list, my_username: str, keep_links:
     # Remove specified words/phrases from caption before processing
     if remove_words:
         for word in remove_words:
-            if word.strip():
-                caption = caption.replace(word.strip(), "")
+            word = word.strip()
+            if not word:
+                continue
+            if " X" in word or word.endswith("X"):
+                # "Video X" => remove "Video 1", "Video 2", "Video 123" etc.
+                prefix = word[:-1].rstrip()  # "Video X" -> "Video"
+                pattern = re.escape(prefix) + r"\s*\d+"
+                caption = re.sub(pattern, "", caption, flags=re.IGNORECASE)
+            else:
+                caption = caption.replace(word, "")
         caption = re.sub(r"\n{3,}", "\n\n", caption).strip()
 
     def u16_to_char(text, u16_off):
