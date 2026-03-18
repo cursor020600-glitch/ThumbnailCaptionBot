@@ -238,7 +238,7 @@ async def setup_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb = [[InlineKeyboardButton("✅ Keep links", callback_data="links_yes"),
            InlineKeyboardButton("❌ Remove links", callback_data="links_no")]]
     await update.message.reply_text(
-        f"✅ `@{username}`\n\n*Step 2/4:* Keep clickable links in captions?",
+        f"✅ `\n\nExtracted by :- @{username}`\n\n*Step 2/4:* Keep clickable links in captions?",
         reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN)
     return SETUP_KEEP_LINKS
 
