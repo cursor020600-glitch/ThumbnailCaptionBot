@@ -603,11 +603,14 @@ def main():
     app.add_handler(CommandHandler("viewthumb", viewthumb))
     app.add_handler(setup_conv)
     app.add_handler(setthumb_conv)
-    # Sab media + text ek saath — group=0 default
+    # group=1 — ConversationHandler (group=0) ke baad chalta hai
+    # Jab user kisi conversation me nahi hota, yeh handler sab messages pakadta hai
     app.add_handler(MessageHandler(
-        filters.ALL & ~filters.COMMAND,
+        filters.VIDEO | filters.PHOTO | filters.Document.ALL |
+        filters.AUDIO | filters.VOICE |
+        (filters.TEXT & ~filters.COMMAND),
         handle_message
-    ))
+    ), group=1)
 
     print("🤖 Bot running — PTB v22 + Render health server!")
     app.run_polling(drop_pending_updates=True)
