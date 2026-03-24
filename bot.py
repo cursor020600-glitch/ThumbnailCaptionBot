@@ -419,7 +419,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_video = bool(msg.video)
     is_photo = bool(msg.photo)
     is_doc   = bool(msg.document)
-    is_text  = bool(msg.text and not msg.photo and not msg.video and not msg.document and not msg.audio and not msg.voice)
+    is_text  = bool(not msg.photo and not msg.video and not msg.document and not msg.audio and not msg.voice)
     is_audio = bool(msg.audio)
     is_voice = bool(msg.voice)
 
@@ -598,12 +598,18 @@ def main():
     app.add_handler(CommandHandler("viewthumb", viewthumb))
     app.add_handler(setup_conv)
     app.add_handler(setthumb_conv)
+    # group=1 taake ConversationHandler pehle chale, phir yeh — 
+    # PHOTO/VIDEO/DOC/AUDIO/VOICE ConversationHandler absorb nahi karta
     app.add_handler(MessageHandler(
         filters.VIDEO | filters.PHOTO | filters.Document.ALL |
-        filters.AUDIO | filters.VOICE |
-        (filters.TEXT & ~filters.COMMAND),
+        filters.AUDIO | filters.VOICE,
         handle_message
-    ))
+    ), group=1)
+    # Text alag group me — commands aur conversation ke baad
+    app.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND,
+        handle_message
+    ), group=2)
 
     print("🤖 Bot running — PTB v22 + Render health server!")
     app.run_polling(drop_pending_updates=True)
