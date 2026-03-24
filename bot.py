@@ -407,9 +407,9 @@ async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ══════════════════════════════════════════════
-#  VIDEO HANDLER
+#  UNIVERSAL MESSAGE HANDLER
 # ══════════════════════════════════════════════
-async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cfg = load_config()
     if not cfg:
         await update.message.reply_text("⚠️ Run /setup first!")
@@ -417,18 +417,19 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     msg = update.message
     is_video = bool(msg.video)
+    is_photo = bool(msg.photo)
     is_doc   = bool(msg.document)
-    if not (is_video or is_doc):
-        return
+    is_text  = bool(msg.text and not msg.photo and not msg.video and not msg.document and not msg.audio and not msg.voice)
+    is_audio = bool(msg.audio)
+    is_voice = bool(msg.voice)
 
-    file_id  = msg.video.file_id if is_video else msg.document.file_id
-    duration = msg.video.duration if is_video else None
-    width    = msg.video.width    if is_video else None
-    height   = msg.video.height   if is_video else None
+    # Caption ya text process karo
+    raw_text    = msg.caption if (is_video or is_photo or is_doc or is_audio or is_voice) else (msg.text or "")
+    raw_entities = list(msg.caption_entities or []) if (is_video or is_photo or is_doc or is_audio or is_voice) else list(msg.entities or [])
 
     new_caption, new_ents = process_entities(
-        msg.caption or "",
-        list(msg.caption_entities) if msg.caption_entities else [],
+        raw_text or "",
+        raw_entities,
         cfg["username"],
         cfg.get("keep_links", True),
         cfg.get("remove_words", [])
@@ -440,11 +441,15 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status = await msg.reply_text("⚡ Processing...")
 
     try:
-        if thumb_ok:
-            thumb_fid = await get_thumbnail_file_id(context, msg.chat_id, cfg)
-
-            if thumb_fid:
-                if is_video:
+        # ── VIDEO ──
+        if is_video:
+            file_id  = msg.video.file_id
+            duration = msg.video.duration
+            width    = msg.video.width
+            height   = msg.video.height
+            if thumb_ok:
+                thumb_fid = await get_thumbnail_file_id(context, msg.chat_id, cfg)
+                if thumb_fid:
                     await context.bot.send_video(
                         chat_id=msg.chat_id,
                         video=file_id,
@@ -457,6 +462,42 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         height=height,
                     )
                 else:
+                    await context.bot.copy_message(
+                        chat_id=msg.chat_id, from_chat_id=msg.chat_id,
+                        message_id=msg.message_id,
+                        caption=new_caption, caption_entities=new_ents or None,
+                    )
+            else:
+                await context.bot.copy_message(
+                    chat_id=msg.chat_id, from_chat_id=msg.chat_id,
+                    message_id=msg.message_id,
+                    caption=new_caption, caption_entities=new_ents or None,
+                )
+
+        # ── PHOTO ──
+        elif is_photo:
+            file_id = msg.photo[-1].file_id
+            if thumb_ok:
+                # Photo ke liye thumbnail nahi hoti, sirf caption update
+                await context.bot.send_photo(
+                    chat_id=msg.chat_id,
+                    photo=file_id,
+                    caption=new_caption,
+                    caption_entities=new_ents or None,
+                )
+            else:
+                await context.bot.copy_message(
+                    chat_id=msg.chat_id, from_chat_id=msg.chat_id,
+                    message_id=msg.message_id,
+                    caption=new_caption, caption_entities=new_ents or None,
+                )
+
+        # ── DOCUMENT (PDF, file, etc.) ──
+        elif is_doc:
+            file_id = msg.document.file_id
+            if thumb_ok:
+                thumb_fid = await get_thumbnail_file_id(context, msg.chat_id, cfg)
+                if thumb_fid:
                     await context.bot.send_document(
                         chat_id=msg.chat_id,
                         document=file_id,
@@ -464,21 +505,41 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         caption_entities=new_ents or None,
                         thumbnail=open(thumb_local, "rb"),
                     )
+                else:
+                    await context.bot.copy_message(
+                        chat_id=msg.chat_id, from_chat_id=msg.chat_id,
+                        message_id=msg.message_id,
+                        caption=new_caption, caption_entities=new_ents or None,
+                    )
             else:
                 await context.bot.copy_message(
-                    chat_id=msg.chat_id,
-                    from_chat_id=msg.chat_id,
+                    chat_id=msg.chat_id, from_chat_id=msg.chat_id,
                     message_id=msg.message_id,
-                    caption=new_caption,
-                    caption_entities=new_ents or None,
+                    caption=new_caption, caption_entities=new_ents or None,
                 )
-        else:
+
+        # ── AUDIO ──
+        elif is_audio:
             await context.bot.copy_message(
-                chat_id=msg.chat_id,
-                from_chat_id=msg.chat_id,
+                chat_id=msg.chat_id, from_chat_id=msg.chat_id,
                 message_id=msg.message_id,
-                caption=new_caption,
-                caption_entities=new_ents or None,
+                caption=new_caption, caption_entities=new_ents or None,
+            )
+
+        # ── VOICE ──
+        elif is_voice:
+            await context.bot.copy_message(
+                chat_id=msg.chat_id, from_chat_id=msg.chat_id,
+                message_id=msg.message_id,
+                caption=new_caption, caption_entities=new_ents or None,
+            )
+
+        # ── SIRF TEXT / LINK ──
+        elif is_text:
+            await context.bot.send_message(
+                chat_id=msg.chat_id,
+                text=new_caption,
+                entities=new_ents or None,
             )
 
         await status.delete()
@@ -538,8 +599,10 @@ def main():
     app.add_handler(setup_conv)
     app.add_handler(setthumb_conv)
     app.add_handler(MessageHandler(
-        filters.VIDEO | filters.Document.VIDEO | filters.Document.MimeType("video/mp4"),
-        handle_video
+        filters.VIDEO | filters.PHOTO | filters.Document.ALL |
+        filters.AUDIO | filters.VOICE |
+        (filters.TEXT & ~filters.COMMAND),
+        handle_message
     ))
 
     print("🤖 Bot running — PTB v22 + Render health server!")
