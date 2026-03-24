@@ -416,12 +416,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     msg = update.message
+    if not msg:
+        return
+
+    logger.info(f"MSG received: video={bool(msg.video)} photo={bool(msg.photo)} doc={bool(msg.document)} text={bool(msg.text)} audio={bool(msg.audio)} voice={bool(msg.voice)}")
+
     is_video = bool(msg.video)
     is_photo = bool(msg.photo)
     is_doc   = bool(msg.document)
-    is_text  = bool(not msg.photo and not msg.video and not msg.document and not msg.audio and not msg.voice)
     is_audio = bool(msg.audio)
     is_voice = bool(msg.voice)
+    is_text  = bool(not is_video and not is_photo and not is_doc and not is_audio and not is_voice)
 
     # Caption ya text process karo
     raw_text    = msg.caption if (is_video or is_photo or is_doc or is_audio or is_voice) else (msg.text or "")
@@ -598,18 +603,11 @@ def main():
     app.add_handler(CommandHandler("viewthumb", viewthumb))
     app.add_handler(setup_conv)
     app.add_handler(setthumb_conv)
-    # group=1 taake ConversationHandler pehle chale, phir yeh — 
-    # PHOTO/VIDEO/DOC/AUDIO/VOICE ConversationHandler absorb nahi karta
+    # Sab media + text ek saath — group=0 default
     app.add_handler(MessageHandler(
-        filters.VIDEO | filters.PHOTO | filters.Document.ALL |
-        filters.AUDIO | filters.VOICE,
+        filters.ALL & ~filters.COMMAND,
         handle_message
-    ), group=1)
-    # Text alag group me — commands aur conversation ke baad
-    app.add_handler(MessageHandler(
-        filters.TEXT & ~filters.COMMAND,
-        handle_message
-    ), group=2)
+    ))
 
     print("🤖 Bot running — PTB v22 + Render health server!")
     app.run_polling(drop_pending_updates=True)
