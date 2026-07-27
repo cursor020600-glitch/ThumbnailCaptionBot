@@ -20,13 +20,13 @@ from telegram.ext import (
     ContextTypes, filters, ConversationHandler
 )
 from telegram.constants import ParseMode
-from telegram.error import TelegramError
+from telegram.error import TelegramError, RetryAfter
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 CONFIG_FILE = "config.json"
-(SETUP_USERNAME, SETUP_KEEP_LINKS, SETUP_THUMBNAIL, AWAIT_THUMBNAIL_IMAGE, SETTHUMB_AWAIT, SETUP_REMOVE_WORDS) = range(6)
+(SETUP_USERNAME, SETUP_KEEP_LINKS, SETUP_THUMBNAIL, AWAIT_THUMBNAIL_IMAGE, SETTHUMB_AWAIT, SETUP_REMOVE_WORDS, SETUP_DELIVERY_CHOICE, SETUP_DELIVERY_AWAIT) = range(8)
 
 
 # ══════════════════════════════════════════════
@@ -60,6 +60,26 @@ def load_config() -> dict:
 def save_config(cfg: dict):
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2, ensure_ascii=False)
+
+
+def get_delivery_target(cfg: dict, source_chat_id: int):
+    if cfg.get("delivery_mode") == "channel" and cfg.get("delivery_chat_id") is not None:
+        return cfg["delivery_chat_id"]
+    return source_chat_id
+
+
+async def call_with_retry(action, *, retries: int = 3):
+    for attempt in range(retries + 1):
+        try:
+            return await action()
+        except RetryAfter as e:
+            wait_seconds = int(getattr(e, "retry_after", 1)) + 1
+            logger.warning(f"Flood control hit, retrying in {wait_seconds}s")
+            await asyncio.sleep(wait_seconds)
+        except TelegramError:
+            raise
+
+    raise TelegramError("Retry limit exceeded")
 
 
 # ══════════════════════════════════════════════
@@ -141,25 +161,22 @@ def process_entities(caption: str, entities: list, my_username: str, keep_links:
                 out_ents.append(MessageEntity(type=MessageEntity.MENTION,
                     offset=mention_u16, length=to_u16len(new_m)))
             else:
-                # Kisi aur ka username — waise hi rehne do, koi change nahi
-                out_text += chunk
+                # Kisi aur ka username — use apne configured username se replace karo
+                replacement = f"@{clean_uname}"
+                out_text += replacement
                 out_ents.append(MessageEntity(type=MessageEntity.MENTION,
-                    offset=cur_u16, length=to_u16len(chunk)))
+                    offset=cur_u16, length=to_u16len(replacement)))
 
         elif et == MessageEntity.TEXT_LINK:
             url = e["url"] or ""
-            is_tme = "t.me/" in url or "telegram.me/" in url
             out_text += chunk
-            if keep_links and not is_tme:
+            if keep_links:
+                # Keep linked text clickable so labels like "OPEN LINK" do not lose their URL.
                 out_ents.append(MessageEntity(type=MessageEntity.TEXT_LINK,
                     offset=cur_u16, length=to_u16len(chunk), url=url))
 
         elif et == MessageEntity.URL:
-            url = chunk
-            is_tme = "t.me/" in url or "telegram.me/" in url
-            if is_tme:
-                pass
-            elif keep_links:
+            if keep_links:
                 out_text += chunk
                 out_ents.append(MessageEntity(type=MessageEntity.URL,
                     offset=cur_u16, length=to_u16len(chunk)))
@@ -179,10 +196,6 @@ def process_entities(caption: str, entities: list, my_username: str, keep_links:
         prev = ce
 
     out_text += caption[prev:]
-
-    out_text = re.sub(r'\S+\.t\.me\S*', '', out_text)
-    out_text = re.sub(r'https?://t\.me\S*', '', out_text)
-    out_text = re.sub(r't\.me/\S*', '', out_text)
 
     out_text = re.sub(r"\n{3,}", "\n\n", out_text).strip()
 
@@ -240,7 +253,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🔗 Keep links: `{'Yes' if cfg.get('keep_links') else 'No'}`\n"
             f"🖼 Thumbnail: `{'Set ✅' if thumb_ok else 'Not set ❌'}`\n"
             f"🗑 Remove words: `{rw_display}`\n\n"
-            "📨 Forward any video — processed instantly!\n\n"
+            "📨 Send any text, file, or media — processed instantly!\n\n"
             "/setup · /settings · /setthumb · /viewthumb"
         )
     else:
@@ -253,7 +266,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ══════════════════════════════════════════════
 async def setup_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "⚙️ *Setup — Step 1/4*\n\nEnter your Telegram username:\n_(e.g. `Coursesbuying`)_",
+        "⚙️ *Setup — Step 1/5*\n\nEnter your Telegram username:\n_(e.g. `Coursesbuying`)_",
         parse_mode=ParseMode.MARKDOWN)
     return SETUP_USERNAME
 
@@ -266,7 +279,7 @@ async def setup_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb = [[InlineKeyboardButton("✅ Keep links", callback_data="links_yes"),
            InlineKeyboardButton("❌ Remove links", callback_data="links_no")]]
     await update.message.reply_text(
-        f"✅ `@{username}`\n\n*Step 2/4:* Keep clickable links in captions?",
+        f"✅ `@{username}`\n\n*Step 2/5:* Keep clickable links in captions?",
         reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN)
     return SETUP_KEEP_LINKS
 
@@ -277,7 +290,7 @@ async def setup_keep_links(update: Update, context: ContextTypes.DEFAULT_TYPE):
            InlineKeyboardButton("⏭ Skip", callback_data="thumb_skip")]]
     await q.edit_message_text(
         f"{'✅ Links kept.' if context.user_data['kl'] else '❌ Links removed.'}\n\n"
-        "*Step 3/4:* Set a custom thumbnail?",
+        "*Step 3/5:* Set a custom thumbnail?",
         reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN)
     return SETUP_THUMBNAIL
 
@@ -286,7 +299,7 @@ async def setup_thumbnail_choice(update: Update, context: ContextTypes.DEFAULT_T
     if q.data == "thumb_skip":
         context.user_data["tp"] = None
         await q.edit_message_text(
-            "⏭ No thumbnail.\n\n*Step 4/4:* Caption se koi word/phrase delete karna hai?\n\n"
+            "⏭ No thumbnail.\n\n*Step 4/5:* Caption se koi word/phrase delete karna hai?\n\n"
             "Ek ek karke likho, har word/phrase alag line mein.\n"
             "Ya `skip` likho agar kuch nahi hatana.",
             parse_mode=ParseMode.MARKDOWN)
@@ -305,7 +318,7 @@ async def setup_recv_thumb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await f.download_to_drive(p)
     context.user_data["tp"] = p
     await update.message.reply_text(
-        "✅ Thumbnail saved!\n\n*Step 4/4:* Caption se koi word/phrase delete karna hai?\n\n"
+        "✅ Thumbnail saved!\n\n*Step 4/5:* Caption se koi word/phrase delete karna hai?\n\n"
         "Ek ek karke likho, har word/phrase alag line mein.\n"
         "Ya `skip` likho agar kuch nahi hatana.",
         parse_mode=ParseMode.MARKDOWN)
@@ -319,6 +332,69 @@ async def setup_remove_words(update: Update, context: ContextTypes.DEFAULT_TYPE)
         # Har line ek alag word/phrase
         words = [w.strip() for w in text.split("\n") if w.strip()]
         context.user_data["rw"] = words
+    kb = [[
+        InlineKeyboardButton("📨 Here itself", callback_data="setup_delivery_here"),
+        InlineKeyboardButton("📣 Another channel", callback_data="setup_delivery_channel"),
+    ]]
+    await update.message.reply_text(
+        "📍 *Step 5/5:* Where should processed text/files/videos be sent?",
+        reply_markup=InlineKeyboardMarkup(kb),
+        parse_mode=ParseMode.MARKDOWN,
+    )
+    return SETUP_DELIVERY_CHOICE
+
+
+async def setup_delivery_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+
+    if q.data == "setup_delivery_here":
+        context.user_data["delivery_mode"] = "here"
+        context.user_data.pop("delivery_chat_id", None)
+        context.user_data.pop("delivery_chat_title", None)
+        return await _finalize_setup(update, context)
+
+    await q.edit_message_text(
+        "📣 Send the target channel username or chat id now.\n\n"
+        "Examples: `@mychannel` or `-1001234567890`\n"
+        "Bot must be added to that channel with permission to post.",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+    return SETUP_DELIVERY_AWAIT
+
+
+async def setup_delivery_recv(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    target = update.message.text.strip()
+    if not target:
+        await update.message.reply_text("❌ Send a channel username or chat id.")
+        return SETUP_DELIVERY_AWAIT
+
+    if target.startswith("https://t.me/"):
+        target = "@" + target.rstrip("/").split("/")[-1]
+    elif target.startswith("t.me/"):
+        target = "@" + target.rstrip("/").split("/")[-1]
+    elif not target.startswith("@") and not re.fullmatch(r"-?\d+", target):
+        if " " in target:
+            await update.message.reply_text("❌ Send a valid channel username like @mychannel or a numeric chat id.")
+            return SETUP_DELIVERY_AWAIT
+        target = "@" + target
+
+    try:
+        chat = await context.bot.get_chat(target)
+    except TelegramError as e:
+        logger.error(f"Channel lookup error: {e}")
+        await update.message.reply_text(
+            "❌ I could not access that channel. Make sure the bot is added there and you sent a valid @username or chat id."
+        )
+        return SETUP_DELIVERY_AWAIT
+
+    if chat.type != "channel":
+        await update.message.reply_text("❌ That is not a channel. Send a channel username or channel chat id.")
+        return SETUP_DELIVERY_AWAIT
+
+    context.user_data["delivery_mode"] = "channel"
+    context.user_data["delivery_chat_id"] = chat.id
+    context.user_data["delivery_chat_title"] = chat.title
     return await _finalize_setup(update, context)
 
 async def _finalize_setup(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -330,16 +406,24 @@ async def _finalize_setup(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "thumbnail_local": ud.get("tp"),
         "thumbnail_file_id": None,
         "remove_words": remove_words,
+        "delivery_mode": ud.get("delivery_mode", "here"),
+        "delivery_chat_id": ud.get("delivery_chat_id"),
+        "delivery_chat_title": ud.get("delivery_chat_title"),
     }
     save_config(cfg)
     rw_display = "\n".join(f"  • `{w}`" for w in remove_words) if remove_words else "  _None_"
+    if cfg.get("delivery_mode") == "channel" and cfg.get("delivery_chat_id") is not None:
+        delivery_display = f"Channel: {cfg.get('delivery_chat_title', 'set')}"
+    else:
+        delivery_display = "Here itself"
     target = update.callback_query.message if update.callback_query else update.message
     await target.reply_text(
         f"🎉 *Done!*\n\n👤 `@{cfg['username']}`\n"
         f"🔗 Links: `{'Keep' if cfg['keep_links'] else 'Remove'}`\n"
+        f"📍 Send to: `{delivery_display}`\n"
         f"🖼 Thumb: `{'Set ✅' if cfg['thumbnail_local'] else 'Not set'}`\n"
         f"🗑 Remove words:\n{rw_display}\n\n"
-        "📨 Forward a video now!",
+        "📨 Send any text, file, or media now!",
         parse_mode=ParseMode.MARKDOWN)
     return ConversationHandler.END
 
@@ -396,10 +480,15 @@ async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     thumb_ok = bool(cfg.get("thumbnail_local") and os.path.exists(cfg.get("thumbnail_local", "")))
     remove_words = cfg.get("remove_words", [])
     rw_display = ", ".join(remove_words) if remove_words else "None"
+    if cfg.get("delivery_mode") == "channel" and cfg.get("delivery_chat_id") is not None:
+        delivery_display = f"Channel: {cfg.get('delivery_chat_title', 'set')}"
+    else:
+        delivery_display = "Here itself"
     await update.message.reply_text(
         "⚙️ *Settings*\n\n"
         f"👤 `@{cfg.get('username','not set')}`\n"
         f"🔗 Links: `{'Keep' if cfg.get('keep_links') else 'Remove'}`\n"
+        f"📍 Send to: `{delivery_display}`\n"
         f"🖼 Thumb: `{'Set ✅' if thumb_ok else 'Not set ❌'}`\n"
         f"🗑 Remove words: `{rw_display}`\n\n"
         "/setup · /setthumb · /viewthumb",
@@ -407,7 +496,7 @@ async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ══════════════════════════════════════════════
-#  UNIVERSAL MESSAGE HANDLER
+#  MESSAGE HANDLER
 # ══════════════════════════════════════════════
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cfg = load_config()
@@ -418,136 +507,130 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     if not msg:
         return
-
-    logger.info(f"MSG received: video={bool(msg.video)} photo={bool(msg.photo)} doc={bool(msg.document)} text={bool(msg.text)} audio={bool(msg.audio)} voice={bool(msg.voice)}")
+    reply_markup = msg.reply_markup
 
     is_video = bool(msg.video)
-    is_photo = bool(msg.photo)
     is_doc   = bool(msg.document)
-    is_audio = bool(msg.audio)
-    is_voice = bool(msg.voice)
-    is_text  = bool(not is_video and not is_photo and not is_doc and not is_audio and not is_voice)
-
-    # Caption ya text process karo
-    raw_text    = msg.caption if (is_video or is_photo or is_doc or is_audio or is_voice) else (msg.text or "")
-    raw_entities = list(msg.caption_entities or []) if (is_video or is_photo or is_doc or is_audio or is_voice) else list(msg.entities or [])
-
-    new_caption, new_ents = process_entities(
-        raw_text or "",
-        raw_entities,
-        cfg["username"],
-        cfg.get("keep_links", True),
-        cfg.get("remove_words", [])
+    is_text  = bool(msg.text)
+    is_caption = bool(msg.caption)
+    captionable = bool(msg.video or msg.document or msg.photo or msg.audio or msg.animation)
+    has_payload = bool(
+        msg.text or msg.caption or msg.video or msg.document or msg.photo or
+        msg.audio or msg.animation or msg.voice or msg.sticker or msg.video_note
     )
+    if not has_payload:
+        return
+
+    destination_chat_id = get_delivery_target(cfg, msg.chat_id)
+    same_chat_destination = destination_chat_id == msg.chat_id
+
+    new_caption = None
+    new_ents = None
+    if is_text or is_caption or captionable:
+        text = msg.text if is_text else (msg.caption or "")
+        entities = list(msg.entities) if is_text and msg.entities else list(msg.caption_entities) if msg.caption_entities else []
+
+        new_caption, new_ents = process_entities(
+            text,
+            entities,
+            cfg["username"],
+            cfg.get("keep_links", True),
+            cfg.get("remove_words", [])
+        )
 
     thumb_local = cfg.get("thumbnail_local")
     thumb_ok    = bool(thumb_local and os.path.exists(thumb_local))
 
-    status = await msg.reply_text("⚡ Processing...")
+    status = await call_with_retry(lambda: msg.reply_text("⚡ Processing..."))
+
+    async def finish_success():
+        if same_chat_destination:
+            await call_with_retry(lambda: status.delete())
+        else:
+            await call_with_retry(lambda: status.edit_text("✅ Sent to the configured channel."))
 
     try:
-        # ── VIDEO ──
-        if is_video:
-            file_id  = msg.video.file_id
-            duration = msg.video.duration
-            width    = msg.video.width
-            height   = msg.video.height
-            if thumb_ok:
-                thumb_fid = await get_thumbnail_file_id(context, msg.chat_id, cfg)
-                if thumb_fid:
-                    await context.bot.send_video(
-                        chat_id=msg.chat_id,
-                        video=file_id,
-                        caption=new_caption,
-                        caption_entities=new_ents or None,
-                        cover=thumb_fid,
-                        supports_streaming=True,
-                        duration=duration,
-                        width=width,
-                        height=height,
-                    )
-                else:
-                    await context.bot.copy_message(
-                        chat_id=msg.chat_id, from_chat_id=msg.chat_id,
-                        message_id=msg.message_id,
-                        caption=new_caption, caption_entities=new_ents or None,
-                    )
-            else:
-                await context.bot.copy_message(
-                    chat_id=msg.chat_id, from_chat_id=msg.chat_id,
-                    message_id=msg.message_id,
-                    caption=new_caption, caption_entities=new_ents or None,
-                )
+        if is_text:
+            await call_with_retry(lambda: context.bot.send_message(
+                chat_id=destination_chat_id,
+                text=new_caption,
+                entities=new_ents or None,
+                reply_markup=reply_markup,
+            ))
+            await finish_success()
+            return
 
-        # ── PHOTO ──
-        elif is_photo:
-            file_id = msg.photo[-1].file_id
-            if thumb_ok:
-                # Photo ke liye thumbnail nahi hoti, sirf caption update
-                await context.bot.send_photo(
-                    chat_id=msg.chat_id,
-                    photo=file_id,
+        if is_video and thumb_ok:
+            thumb_fid = await get_thumbnail_file_id(context, msg.chat_id, cfg)
+
+            if thumb_fid:
+                file_id  = msg.video.file_id
+                duration = msg.video.duration
+                width    = msg.video.width
+                height   = msg.video.height
+                await call_with_retry(lambda: context.bot.send_video(
+                    chat_id=destination_chat_id,
+                    video=file_id,
                     caption=new_caption,
                     caption_entities=new_ents or None,
-                )
-            else:
-                await context.bot.copy_message(
-                    chat_id=msg.chat_id, from_chat_id=msg.chat_id,
-                    message_id=msg.message_id,
-                    caption=new_caption, caption_entities=new_ents or None,
-                )
-
-        # ── DOCUMENT (PDF, file, etc.) ──
-        elif is_doc:
-            file_id = msg.document.file_id
-            if thumb_ok:
-                thumb_fid = await get_thumbnail_file_id(context, msg.chat_id, cfg)
-                if thumb_fid:
-                    await context.bot.send_document(
-                        chat_id=msg.chat_id,
+                    reply_markup=reply_markup,
+                    cover=thumb_fid,
+                    supports_streaming=True,
+                    duration=duration,
+                    width=width,
+                    height=height,
+                ))
+            elif is_doc:
+                file_id = msg.document.file_id
+                with open(thumb_local, "rb") as thumbnail_file:
+                    await call_with_retry(lambda: context.bot.send_document(
+                        chat_id=destination_chat_id,
                         document=file_id,
                         caption=new_caption,
                         caption_entities=new_ents or None,
-                        thumbnail=open(thumb_local, "rb"),
-                    )
-                else:
-                    await context.bot.copy_message(
-                        chat_id=msg.chat_id, from_chat_id=msg.chat_id,
-                        message_id=msg.message_id,
-                        caption=new_caption, caption_entities=new_ents or None,
-                    )
+                        reply_markup=reply_markup,
+                        thumbnail=thumbnail_file,
+                    ))
             else:
-                await context.bot.copy_message(
-                    chat_id=msg.chat_id, from_chat_id=msg.chat_id,
+                await call_with_retry(lambda: context.bot.copy_message(
+                    chat_id=destination_chat_id,
+                    from_chat_id=msg.chat_id,
                     message_id=msg.message_id,
-                    caption=new_caption, caption_entities=new_ents or None,
-                )
-
-        # ── AUDIO ──
-        elif is_audio:
-            await context.bot.copy_message(
-                chat_id=msg.chat_id, from_chat_id=msg.chat_id,
+                    caption=new_caption,
+                    caption_entities=new_ents or None,
+                    reply_markup=reply_markup,
+                ))
+        elif is_doc and thumb_ok:
+            file_id = msg.document.file_id
+            with open(thumb_local, "rb") as thumbnail_file:
+                await call_with_retry(lambda: context.bot.send_document(
+                    chat_id=destination_chat_id,
+                    document=file_id,
+                    caption=new_caption,
+                    caption_entities=new_ents or None,
+                    reply_markup=reply_markup,
+                    thumbnail=thumbnail_file,
+                ))
+        elif is_video:
+            await call_with_retry(lambda: context.bot.copy_message(
+                chat_id=destination_chat_id,
+                from_chat_id=msg.chat_id,
                 message_id=msg.message_id,
-                caption=new_caption, caption_entities=new_ents or None,
-            )
-
-        # ── VOICE ──
-        elif is_voice:
-            await context.bot.copy_message(
-                chat_id=msg.chat_id, from_chat_id=msg.chat_id,
+                caption=new_caption,
+                caption_entities=new_ents or None,
+                reply_markup=reply_markup,
+            ))
+        else:
+            await call_with_retry(lambda: context.bot.copy_message(
+                chat_id=destination_chat_id,
+                from_chat_id=msg.chat_id,
                 message_id=msg.message_id,
-                caption=new_caption, caption_entities=new_ents or None,
-            )
+                caption=new_caption,
+                caption_entities=new_ents or None,
+                reply_markup=reply_markup,
+            ))
 
-        # ── SIRF TEXT / LINK ──
-        elif is_text:
-            await context.bot.send_message(
-                chat_id=msg.chat_id,
-                text=new_caption,
-                entities=new_ents or None,
-            )
-
-        await status.delete()
+        await finish_success()
 
     except TelegramError as e:
         logger.error(f"Telegram error: {e}")
@@ -589,6 +672,8 @@ def main():
             SETUP_THUMBNAIL:       [CallbackQueryHandler(setup_thumbnail_choice, pattern="^thumb_")],
             AWAIT_THUMBNAIL_IMAGE: [MessageHandler(filters.PHOTO, setup_recv_thumb)],
             SETUP_REMOVE_WORDS:    [MessageHandler(filters.TEXT, setup_remove_words)],
+            SETUP_DELIVERY_CHOICE: [CallbackQueryHandler(setup_delivery_choice, pattern="^setup_delivery_")],
+            SETUP_DELIVERY_AWAIT:  [MessageHandler(filters.TEXT & ~filters.COMMAND, setup_delivery_recv)],
         },
         fallbacks=[CommandHandler("cancel", setup_cancel)],
     )
@@ -603,14 +688,7 @@ def main():
     app.add_handler(CommandHandler("viewthumb", viewthumb))
     app.add_handler(setup_conv)
     app.add_handler(setthumb_conv)
-    # group=1 — ConversationHandler (group=0) ke baad chalta hai
-    # Jab user kisi conversation me nahi hota, yeh handler sab messages pakadta hai
-    app.add_handler(MessageHandler(
-        filters.VIDEO | filters.PHOTO | filters.Document.ALL |
-        filters.AUDIO | filters.VOICE |
-        (filters.TEXT & ~filters.COMMAND),
-        handle_message
-    ), group=1)
+    app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
 
     print("🤖 Bot running — PTB v22 + Render health server!")
     app.run_polling(drop_pending_updates=True)
